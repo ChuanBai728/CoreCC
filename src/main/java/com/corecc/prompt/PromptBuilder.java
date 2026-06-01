@@ -14,6 +14,13 @@ public class PromptBuilder {
      * 生成系统提示词，包含环境信息、可用工具列表和行为规则。
      */
     public static String systemPrompt(List<Tool> tools) {
+        return systemPrompt(tools, "");
+    }
+
+    /**
+     * 生成系统提示词，包含可选动态能力提示块。
+     */
+    public static String systemPrompt(List<Tool> tools, String capabilityBlock) {
         String cwd = System.getProperty("user.dir");
         String toolList = tools.stream()
             .map(t -> String.format("- **%s**: %s", t.getName(), t.getDescription()))
@@ -22,6 +29,17 @@ public class PromptBuilder {
         String os = System.getProperty("os.name") + " " + System.getProperty("os.version") +
             " (" + System.getProperty("os.arch") + ")";
         String javaVersion = System.getProperty("java.version");
+        boolean benchMode = "1".equals(System.getenv("CORECC_BENCH_MODE"));
+        String benchmarkRules = benchMode ? """
+
+            # Terminal-Bench Mode
+            - You are running non-interactively in /app. Do not ask clarifying questions.
+            - First inspect the task files, available tests/check scripts, and key directory contents.
+            - If the task names an output path, create that exact path. Use write_bytes_base64 for binary artifacts.
+            - Prefer the task's own verifier/check/eval commands over broad test suites.
+            - After creating artifacts, run a focused verification command and fix failures before finalizing.
+            - Preserve enough time to deliver a minimum working artifact instead of continuing open-ended exploration.
+            """ : "";
 
         return String.format("""
             You are CoreCC, an AI coding assistant running in the user's terminal.
@@ -33,6 +51,8 @@ public class PromptBuilder {
             - Java: %s
 
             # Tools
+            %s
+
             %s
 
             # Rules
@@ -47,11 +67,14 @@ public class PromptBuilder {
             9. **Verify requested artifacts.** Before finishing, verify requested output files exist and contain the intended content, especially absolute paths such as /app/result.txt.
             10. **Headless tasks should finish by acting.** In benchmark or non-interactive tasks, make reasonable assumptions and use tools instead of asking clarification.
             11. **Ask when truly blocked.** If a normal interactive request is ambiguous and acting would be risky, ask for clarification rather than guessing.
+            %s
             """,
             cwd,
             os,
             javaVersion,
-            toolList
+            toolList,
+            capabilityBlock == null || capabilityBlock.isBlank() ? "" : capabilityBlock,
+            benchmarkRules
         );
     }
 }

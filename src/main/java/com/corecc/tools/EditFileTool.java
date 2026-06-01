@@ -160,7 +160,7 @@ public class EditFileTool implements Tool {
 
         diff.append(String.format("@@ -%d,%d +%d,%d @@\n",
             contextStart + 1, contextEnd - contextStart,
-            contextStart + 1, contextEnd - contextStart + (newEnd - newStart)));
+            contextStart + 1, contextEnd - contextStart + (newEnd - start)));
 
         // Old lines
         for (int i = contextStart; i <= Math.min(oldEnd, contextEnd - 1); i++) {

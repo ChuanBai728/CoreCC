@@ -74,7 +74,7 @@ public class BashTool implements Tool {
     @Override
     public String execute(Map<String, Object> args) {
         String command = (String) args.get("command");
-        int timeout = args.containsKey("timeout") ? ((Number) args.get("timeout")).intValue() : 120;
+        int timeout = args.containsKey("timeout") ? ((Number) args.get("timeout")).intValue() : estimateTimeout(command);
 
         // Safety check
         String warning = checkDangerous(command);
@@ -167,15 +167,45 @@ public class BashTool implements Tool {
     }
 
     /**
+     * 根据命令类型智能估算超时时间。
+     */
+    private int estimateTimeout(String cmd) {
+        String lower = cmd.toLowerCase().trim();
+        // 编译任务
+        if (lower.matches(".*(\\bmake\\b|\\bcmake\\b|\\bgradle\\b|\\bmvn\\b|\\bcargo build\\b|\\bgcc\\b|\\bg\\+\\b).*")) return 300;
+        // 测试任务
+        if (lower.matches(".*(\\bpytest\\b|\\btest\\b|\\bcargo test\\b|\\bgo test\\b|\\bjunit\\b).*")) return 300;
+        // 依赖安装
+        if (lower.matches(".*(\\bpip install\\b|\\bnpm install\\b|\\bapt-get\\b|\\byum\\b|\\bpip3 install\\b).*")) return 180;
+        // 训练/长时间运行
+        if (lower.matches(".*(\\btrain\\b|\\bfit\\b|\\bepoch\\b|\\bpython.*train).*")) return 600;
+        // 网络操作
+        if (lower.matches(".*(\\bgit clone\\b|\\bgit pull\\b|\\bcurl\\b|\\bwget\\b).*")) return 120;
+        return 120; // 默认
+    }
+
+    /**
      * 检测命令是否危险。
      */
     private String checkDangerous(String cmd) {
         for (DangerousPattern dp : DANGEROUS_PATTERNS) {
             if (Pattern.compile(dp.pattern, Pattern.CASE_INSENSITIVE).matcher(cmd).find()) {
+                if ((dp.pattern.equals("\\brm\\s+(-\\w*)?-rf\\s") ||
+                     dp.pattern.equals("\\brm\\s+(-\\w*)?-r\\w*\\s+(/|~|\\$HOME)")) &&
+                    isSafeLocalRecursiveRm(cmd)) {
+                    continue;
+                }
                 return dp.reason;
             }
         }
         return null;
+    }
+
+    private boolean isSafeLocalRecursiveRm(String cmd) {
+        String lower = cmd.toLowerCase(Locale.ROOT);
+        if (!lower.matches(".*\\brm\\s+(-\\w*)?-r\\w*\\s+.*")) return false;
+        if (lower.matches(".*\\brm\\s+(-\\w*)?-r\\w*\\s+(?:/|~|\\$home|/home|/root)(?:\\s|$).*")) return false;
+        return lower.matches(".*\\brm\\s+(-\\w*)?-r\\w*\\s+((\\./)?[a-z0-9._-][^;&|]*|/app/[^;&|]+|/tmp/[^;&|]+).*");
     }
 
     /**

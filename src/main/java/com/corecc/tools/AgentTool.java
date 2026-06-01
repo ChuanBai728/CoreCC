@@ -75,7 +75,8 @@ public class AgentTool implements Tool {
                 parentAgent.getContext().getMaxTokens(),
                 20,  // max rounds for sub-agent
                 null,  // no memory for sub-agent
-                false  // disable memory
+                false,  // disable memory
+                parentAgent.getCapabilityPromptBlock()
             );
 
             // Run sub-agent

@@ -8,6 +8,7 @@ import com.corecc.llm.ToolCall;
 import com.corecc.memory.MemoryEntry;
 import com.corecc.memory.MemoryStore;
 import com.corecc.prompt.PromptBuilder;
+import com.corecc.runtime.ArtifactVerifier;
 import com.corecc.runtime.RuntimeReview;
 import com.corecc.runtime.RuntimeStats;
 import com.corecc.runtime.ToolReview;
@@ -41,9 +42,15 @@ public class Agent {
     private final RuntimeStats stats;
     private final int maxRounds;
     private final String systemPrompt;
+    private final String capabilityPromptBlock;
 
     public Agent(LLM llm, List<Tool> tools, int maxContextTokens, int maxRounds,
                  MemoryStore memory, boolean enableMemory) {
+        this(llm, tools, maxContextTokens, maxRounds, memory, enableMemory, "");
+    }
+
+    public Agent(LLM llm, List<Tool> tools, int maxContextTokens, int maxRounds,
+                 MemoryStore memory, boolean enableMemory, String capabilityPromptBlock) {
         this.llm = llm;
         this.tools = tools != null ? tools : ToolRegistry.getAllTools();
         this.messages = new ArrayList<>();
@@ -53,7 +60,8 @@ public class Agent {
         this.activeMemories = new ArrayList<>();
         this.stats = new RuntimeStats();
         this.maxRounds = maxRounds;
-        this.systemPrompt = PromptBuilder.systemPrompt(this.tools);
+        this.capabilityPromptBlock = capabilityPromptBlock != null ? capabilityPromptBlock : "";
+        this.systemPrompt = PromptBuilder.systemPrompt(this.tools, this.capabilityPromptBlock);
 
         // Inject parent agent reference for AgentTool
         for (Tool t : this.tools) {
@@ -96,6 +104,8 @@ public class Agent {
      */
     public RuntimeStats getStats() { return stats; }
 
+    public String getCapabilityPromptBlock() { return capabilityPromptBlock; }
+
     /**
      * 处理一条用户消息，可能涉及多轮大模型/工具调用。
      */
@@ -115,6 +125,14 @@ public class Agent {
         List<String> requestedOutputPaths = requestedOutputPaths(userInput);
         int artifactNudges = 0;
         int emptyFinalRetries = 0;
+        boolean artifactVerified = false;
+        int verificationAttempts = 0;
+        int missingArtifactToolRounds = 0;
+        int transientLlmRecoveries = 0;
+        int maxTransientLlmRecoveries = maxTransientLlmRecoveries();
+
+        // Token budget control: track per-round spending
+        int tokenBudget = llm.getMaxTokens() > 0 ? llm.getMaxTokens() * 4 : 32768 * 4;
 
         for (int round = 0; round < maxRounds; round++) {
             LLMResponse resp;
@@ -122,11 +140,26 @@ public class Agent {
                 resp = callLlmWithReactiveCompact(onToken);
             } catch (ContextLengthRetryError e) {
                 return e.getMessage();
+            } catch (RuntimeException e) {
+                if (isTransientLlmError(e)) {
+                    List<String> missingOutputs = missingOutputPaths(requestedOutputPaths);
+                    if (!missingOutputs.isEmpty() && transientLlmRecoveries < maxTransientLlmRecoveries) {
+                        transientLlmRecoveries++;
+                        recordContextReport(compactForTransientLlmRecovery());
+                        messages.add(Map.of("role", "user", "content",
+                            transientLlmRecoveryNudge(missingOutputs, rootMessage(e),
+                                transientLlmRecoveries, maxTransientLlmRecoveries)));
+                        continue;
+                    }
+                    return "LLM request failed after retries: " + rootMessage(e);
+                }
+                throw e;
             }
 
             // No tool calls -> LLM finished, return text
             if (resp.getToolCalls() == null || resp.getToolCalls().isEmpty()) {
-                // Check for missing output artifacts
+
+                // Check for missing output artifacts (BEFORE empty content check)
                 List<String> missingOutputs = missingOutputPaths(requestedOutputPaths);
                 if (!missingOutputs.isEmpty() && artifactNudges < 3) {
                     messages.add(resp.toMessage());
@@ -135,16 +168,43 @@ public class Agent {
                     continue;
                 }
 
+                // Artifact verification: file exists but not yet verified
+                if (missingOutputs.isEmpty() && !artifactVerified && !requestedOutputPaths.isEmpty()) {
+                    List<String[]> checks = ArtifactVerifier.buildChecks(userInput, requestedOutputPaths);
+                    if (!checks.isEmpty() && verificationAttempts < 3) {
+                        List<String> checkResults = new ArrayList<>();
+                        for (String[] check : checks) {
+                            checkResults.add(runBashCommand(check[1]));
+                        }
+                        ArtifactVerifier.VerifyReport vReport = ArtifactVerifier.evaluate(checks, checkResults);
+                        if (!vReport.allPassed()) {
+                            messages.add(resp.toMessage());
+                            verificationAttempts++;
+                            messages.add(Map.of("role", "user", "content", vReport.getNudge()));
+                            continue;
+                        }
+                        artifactVerified = true;
+                    }
+                }
+
                 // Handle empty final response
                 String content = resp.getContent();
                 if (content == null || content.trim().isEmpty()) {
                     messages.add(resp.toMessage());
                     if (emptyFinalRetries < 2) {
                         emptyFinalRetries++;
-                        messages.add(Map.of("role", "user", "content",
-                            "[运行时提示]\n上一轮没有产生最终文本，也没有调用工具。" +
-                            "如果任务要求创建、保存或修改文件，请立即使用 write_file、edit_file " +
-                            "或 bash 完成并验证；如果已经完成，请给出简短最终说明。"));
+                        // Probe hint: guide model to act instead of just thinking
+                        if (!requestedOutputPaths.isEmpty()) {
+                            messages.add(Map.of("role", "user", "content",
+                                "[运行时提示]\n请立即开始执行：先用 bash 检查环境和文件，" +
+                                "然后用 write_file 写出最小可运行版本，再逐步迭代。" +
+                                "不要在思考中消耗过多 token。"));
+                        } else {
+                            messages.add(Map.of("role", "user", "content",
+                                "[运行时提示]\n上一轮没有产生最终文本，也没有调用工具。" +
+                                "如果任务要求创建、保存或修改文件，请立即使用 write_file、edit_file " +
+                                "或 bash 完成并验证；如果已经完成，请给出简短最终说明。"));
+                        }
                         continue;
                     }
                     return "（模型未返回最终内容或工具调用）";
@@ -184,6 +244,26 @@ public class Agent {
             // Compress context after tool execution
             report = context.maybeCompress(messages, llm, "auto", false);
             recordContextReport(report);
+
+            if (!requestedOutputPaths.isEmpty()) {
+                List<String> missingOutputs = missingOutputPaths(requestedOutputPaths);
+                if (!missingOutputs.isEmpty()) {
+                    missingArtifactToolRounds++;
+                    if (missingArtifactToolRounds == 6 || round >= maxRounds - 8) {
+                        messages.add(Map.of("role", "user", "content",
+                            "Runtime benchmark warning: requested output files are still missing: " +
+                            String.join(", ", missingOutputs) + ". Stop exploring and create the required artifact now. " +
+                            "Use write_file for text or write_bytes_base64 for binary data, then run a focused verification command."));
+                    }
+                }
+            }
+        }
+
+        if (!requestedOutputPaths.isEmpty()) {
+            List<String> missingOutputs = missingOutputPaths(requestedOutputPaths);
+            if (!missingOutputs.isEmpty()) {
+                return "Reached maximum tool rounds; missing requested output files: " + String.join(", ", missingOutputs);
+            }
         }
 
         return "(已达到最大工具调用轮数)";
@@ -374,6 +454,99 @@ public class Agent {
                text.contains("请求过大");
     }
 
+    private boolean isTransientLlmError(Exception e) {
+        String text = rootMessage(e).toLowerCase();
+        return text.contains("llm stream timed out") ||
+               text.contains("timeout") ||
+               text.contains("connection refused") ||
+               text.contains("connectexception") ||
+               text.contains("failed to connect") ||
+               text.contains("couldn't connect") ||
+               text.contains("network is unreachable") ||
+               text.contains("http 429") ||
+               text.contains("too many requests") ||
+               text.contains("rate limit") ||
+               text.contains("http 500") ||
+               text.contains("http 502") ||
+               text.contains("http 503") ||
+               text.contains("http 504");
+    }
+
+    private String rootMessage(Throwable e) {
+        Throwable cur = e;
+        while (cur.getCause() != null) {
+            cur = cur.getCause();
+        }
+        return cur.getMessage() != null ? cur.getMessage() : cur.toString();
+    }
+
+    private int maxTransientLlmRecoveries() {
+        try {
+            return Math.max(0, Integer.parseInt(
+                System.getenv().getOrDefault("CORECC_TRANSIENT_LLM_RECOVERY_ROUNDS", "2")));
+        } catch (NumberFormatException e) {
+            return 2;
+        }
+    }
+
+    private CompressionReport compactForTransientLlmRecovery() {
+        int before = ContextManager.estimateTokens(messages);
+        boolean changed = false;
+        int recentStart = Math.max(0, messages.size() - 4);
+
+        for (int i = 0; i < messages.size(); i++) {
+            Map<String, Object> message = messages.get(i);
+            if (!"tool".equals(message.get("role"))) continue;
+
+            Object rawContent = message.get("content");
+            if (!(rawContent instanceof String content)) continue;
+
+            int limit = i >= recentStart ? 3_000 : 1_000;
+            if (content.length() <= limit) continue;
+
+            Map<String, Object> copy = new LinkedHashMap<>(message);
+            copy.put("content", compactTextForRecovery(content, limit));
+            messages.set(i, copy);
+            changed = true;
+        }
+
+        int after = ContextManager.estimateTokens(messages);
+        return new CompressionReport(
+            changed,
+            before,
+            after,
+            Math.max(0, before - after),
+            changed ? List.of("transient_llm_tool_snip") : List.of(),
+            "transient_llm_recovery"
+        );
+    }
+
+    private String compactTextForRecovery(String text, int limit) {
+        int head = Math.max(200, limit / 2);
+        int tail = Math.max(200, limit - head);
+        return text.substring(0, Math.min(head, text.length())) +
+            String.format("\n\n[tool output compacted after transient LLM error: original %d chars]\n\n", text.length()) +
+            text.substring(Math.max(0, text.length() - tail));
+    }
+
+    private String transientLlmRecoveryNudge(List<String> missingOutputs, String error,
+                                             int attempt, int maxAttempts) {
+        String listed = String.join(", ", missingOutputs);
+        return String.format("""
+            [Runtime recovery after transient LLM failure]
+            The previous LLM request failed with: %s
+            Required output files are still missing: %s
+            Recovery attempt %d/%d has compacted older tool output to reduce context pressure.
+
+            Continue; do not stop or answer in prose only.
+            Immediately create the missing artifact(s). Prefer local bash/python commands over long reasoning:
+            1. Use files already in /app and focused commands to compute/generate the artifact.
+            2. Use write_file for text artifacts, write_bytes_base64 or bash for binary artifacts.
+            3. Verify with the task's exact command or test script before finalizing.
+            4. Avoid re-reading huge files unless strictly needed; use scripts to process them in-place.
+            """, error, listed, attempt, maxAttempts);
+    }
+
     /**
      * 提取任务中要求输出的文件路径。
      */
@@ -382,8 +555,9 @@ public class Agent {
             "(save|write|create|output|generate|保存|写入|创建|生成|输出|存到|落盘)",
             Pattern.CASE_INSENSITIVE
         );
+        // Match absolute paths AND relative filenames with extensions
         Pattern pathRe = Pattern.compile(
-            "(?:[A-Za-z]:\\\\[^\\s'\"`<>|]+|/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+)"
+            "(?:[A-Za-z]:\\\\[^\\s'\"`<>|]+|/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+|[A-Za-z0-9_-]+\\.[A-Za-z]{1,5})"
         );
 
         if (!outputIntent.matcher(text).find()) {
@@ -394,7 +568,7 @@ public class Agent {
         Matcher matcher = pathRe.matcher(text);
         while (matcher.find() && paths.size() < 5) {
             String raw = matcher.group().replaceAll("[.,;:)]+$", "");
-            if (!paths.contains(raw) && raw.contains(".")) {
+            if (!paths.contains(raw) && raw.contains(".") && raw.length() > 3) {
                 paths.add(raw);
             }
         }
@@ -427,6 +601,19 @@ public class Agent {
             任务要求生成文件产物，但以下路径仍不存在：%s
             不要只给出文本答案。下一轮必须调用 write_file 或 edit_file 写入所需文件，优先使用 write_file(file_path="%s", content=...)；写入后用 bash 或 read_file 验证文件存在。""",
             listed, primary);
+    }
+
+    /**
+     * 执行 bash 命令并返回输出（用于验证检查）。
+     */
+    private String runBashCommand(String command) {
+        Tool bashTool = getTool("bash");
+        if (bashTool == null) return "ERROR: bash tool not found";
+        try {
+            return bashTool.execute(Map.of("command", command, "timeout", 30));
+        } catch (Exception e) {
+            return "ERROR: " + e.getMessage();
+        }
     }
 
     /**

@@ -288,7 +288,9 @@ public class ContextManager {
                 compacted.append("\n[结尾]\n").append(tail);
             }
 
-            m.put("content", compacted.toString());
+            Map<String, Object> replacement = new LinkedHashMap<>(m);
+            replacement.put("content", compacted.toString());
+            messages.set(i, replacement);
             changed = true;
         }
         return changed;

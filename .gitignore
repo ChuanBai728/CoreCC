@@ -14,5 +14,15 @@ target/
 .DS_Store
 Thumbs.db
 
+# Env
+.env
+
+# Terminal-Bench
+jobs/
+local-dataset/
+terminal-bench-2/
+.corecc/
+__pycache__/
+
 # Logs
 *.log

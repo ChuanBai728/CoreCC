@@ -1,5 +1,16 @@
 package com.corecc.tools;
 
+import com.corecc.capabilities.CapabilityConfig;
+import com.corecc.capabilities.LoadedCapabilities;
+import com.corecc.mcp.McpClient;
+import com.corecc.mcp.McpConfigLoader;
+import com.corecc.mcp.McpServerConfig;
+import com.corecc.mcp.McpToolAdapter;
+import com.corecc.mcp.McpToolDescriptor;
+import com.corecc.skills.Skill;
+import com.corecc.skills.SkillLoader;
+import com.corecc.skills.SkillTool;
+
 import java.util.*;
 
 /**
@@ -20,10 +31,68 @@ public class ToolRegistry {
      * - agent:   生成子智能体处理复杂子任务（多智能体协作）
      */
     public static List<Tool> getAllTools() {
+        return coreTools();
+    }
+
+    /**
+     * Load built-in tools plus optional local skills and stdio MCP tools.
+     */
+    public static LoadedCapabilities loadConfiguredTools(CapabilityConfig config) {
+        List<Tool> tools = coreTools();
+        List<Skill> skills = new ArrayList<>();
+        List<String> mcpSummaries = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+
+        if (config != null && config.hasSkills()) {
+            skills = SkillLoader.load(config.getSkillPaths());
+            if (!skills.isEmpty()) {
+                tools.add(new SkillTool(skills));
+            }
+        }
+
+        if (config != null && config.hasMcpConfig()) {
+            try {
+                List<McpServerConfig> servers = McpConfigLoader.load(
+                    config.getMcpConfigPath(), config.getMcpTimeoutSec());
+                for (McpServerConfig server : servers) {
+                    try {
+                        McpClient client = McpClient.start(server);
+                        List<McpToolDescriptor> descriptors = client.listTools();
+                        if (descriptors.isEmpty()) {
+                            client.close();
+                            mcpSummaries.add("- " + server.getName() + ": connected, no tools exposed");
+                            continue;
+                        }
+
+                        for (McpToolDescriptor descriptor : descriptors) {
+                            boolean readOnly = server.isTrusted() && descriptor.readOnlyHint();
+                            tools.add(new McpToolAdapter(client, descriptor, readOnly));
+                        }
+
+                        String instruction = client.getServerInstructions();
+                        String suffix = instruction == null || instruction.isBlank()
+                            ? ""
+                            : " Instructions: " + instruction.replaceAll("\\s+", " ").trim();
+                        mcpSummaries.add("- " + server.getName() + ": " + descriptors.size() +
+                            " tool(s) from " + client.getServerDisplayName() + "." + suffix);
+                    } catch (Exception e) {
+                        warnings.add("MCP server '" + server.getName() + "' skipped: " + e.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                warnings.add("MCP config skipped: " + e.getMessage());
+            }
+        }
+
+        return new LoadedCapabilities(tools, skills, mcpSummaries, warnings);
+    }
+
+    private static List<Tool> coreTools() {
         List<Tool> tools = new ArrayList<>();
         tools.add(new BashTool());
         tools.add(new ReadFileTool());
         tools.add(new WriteFileTool());
+        tools.add(new WriteBytesBase64Tool());
         tools.add(new EditFileTool());
         tools.add(new GlobTool());
         tools.add(new GrepTool());

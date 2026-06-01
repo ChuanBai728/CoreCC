@@ -1,6 +1,8 @@
 package com.corecc.cli;
 
 import com.corecc.agent.Agent;
+import com.corecc.capabilities.CapabilityConfig;
+import com.corecc.capabilities.LoadedCapabilities;
 import com.corecc.config.Config;
 import com.corecc.context.ContextManager;
 import com.corecc.llm.LLM;
@@ -55,8 +57,20 @@ public class CLI {
             extra
         );
 
-        // Create Agent
-        this.agent = new Agent(llm, config.getMaxContextTokens());
+        // Create Agent with optional dynamic capabilities
+        LoadedCapabilities capabilities = ToolRegistry.loadConfiguredTools(CapabilityConfig.fromEnv());
+        for (String warning : capabilities.getWarnings()) {
+            System.err.println("[CoreCC capability warning] " + warning);
+        }
+        this.agent = new Agent(
+            llm,
+            capabilities.getTools(),
+            config.getMaxContextTokens(),
+            50,
+            MemoryStore.forWorkspace(null, null),
+            true,
+            capabilities.promptBlock()
+        );
     }
 
     /**
@@ -65,10 +79,13 @@ public class CLI {
     public void runOnce(String prompt) {
         System.out.print("> " + prompt + "\n");
 
-        agent.chat(prompt,
+        String response = agent.chat(prompt,
             token -> System.out.print(token),
             (name, args) -> System.out.printf("\n> %s(%s)%n", name, brief(args))
         );
+        if (response != null && !response.isEmpty()) {
+            System.out.println(response);
+        }
         System.out.println();
     }
 

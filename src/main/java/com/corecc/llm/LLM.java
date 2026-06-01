@@ -10,6 +10,7 @@ import okhttp3.sse.EventSources;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -35,6 +36,15 @@ public class LLM {
     public long totalPromptTokens = 0;
     public long totalCompletionTokens = 0;
 
+    /**
+     * 获取单次输出 token 上限。
+     */
+    public int getMaxTokens() {
+        Object val = extra.get("max_tokens");
+        if (val instanceof Number) return ((Number) val).intValue();
+        return 4096;
+    }
+
     public LLM(String model, String apiKey, String baseUrl, Map<String, Object> extra) {
         this.model = model;
         this.apiKey = apiKey;
@@ -45,7 +55,7 @@ public class LLM {
         // Configure HTTP client with timeouts
         this.client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .build();
     }
@@ -72,22 +82,42 @@ public class LLM {
             body.put("tools", tools);
         }
 
-        // Try with stream_options first, then without
-        for (int streamAttempt = 0; streamAttempt < 3; streamAttempt++) {
+        int maxAttempts = Integer.parseInt(System.getenv().getOrDefault("CORECC_LLM_RETRIES", "6"));
+        boolean includeUsage = true;
+
+        for (int streamAttempt = 0; streamAttempt < maxAttempts; streamAttempt++) {
             try {
-                body.put("stream_options", Map.of("include_usage", true));
+                if (includeUsage) {
+                    body.put("stream_options", Map.of("include_usage", true));
+                } else {
+                    body.remove("stream_options");
+                }
                 return streamRequest(body, onToken);
             } catch (Exception e) {
-                body.remove("stream_options");
-                try {
-                    return streamRequest(body, onToken);
-                } catch (Exception e2) {
-                    if (streamAttempt < 2 && isRetryableStreamError(e2)) {
-                        sleep(streamAttempt);
-                        continue;
-                    }
-                    throw new RuntimeException(e2);
+                if (includeUsage && isStreamOptionsUnsupported(e)) {
+                    includeUsage = false;
+                    body.remove("stream_options");
+                    streamAttempt--;
+                    continue;
                 }
+
+                if (isStreamTimeout(e) && nonStreamFallbackEnabled()) {
+                    try {
+                        System.err.println("[CC] stream timeout; retrying once with non-stream response");
+                        return nonStreamRequest(body);
+                    } catch (Exception fallbackError) {
+                        if (streamAttempt >= maxAttempts - 1 || !isRetryableStreamError(fallbackError)) {
+                            throw new RuntimeException("stream and non-stream requests failed; stream=" +
+                                e.getMessage() + "; non_stream=" + fallbackError.getMessage(), fallbackError);
+                        }
+                    }
+                }
+
+                if (streamAttempt < maxAttempts - 1 && isRetryableStreamError(e)) {
+                    sleep(streamAttempt);
+                    continue;
+                }
+                throw new RuntimeException(e);
             }
         }
 
@@ -124,10 +154,13 @@ public class LLM {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<Exception> errorRef = new AtomicReference<>();
 
+        final int[] eventCount = {0};
         EventSource eventSource = factory.newEventSource(request, new EventSourceListener() {
             @Override
             public void onEvent(EventSource eventSource, String id, String type, String data) {
+                eventCount[0]++;
                 if ("[DONE]".equals(data)) {
+                    System.err.println("[CC] events=" + eventCount[0] + " content=" + contentBuilder.length() + " tools=" + tcMap.size() + " reasoning=" + reasoningBuilder.length());
                     return;
                 }
 
@@ -196,6 +229,16 @@ public class LLM {
             public void onFailure(EventSource eventSource, Throwable t, Response response) {
                 if (t != null) {
                     errorRef.set(new RuntimeException(t));
+                } else if (response != null && response.code() >= 400) {
+                    String body = "";
+                    try {
+                        body = response.body() != null ? response.body().string() : "";
+                    } catch (Exception ignored) {}
+                    String retryAfter = response.header("Retry-After", "");
+                    errorRef.set(new RuntimeException(
+                        "HTTP " + response.code() +
+                        (retryAfter.isEmpty() ? "" : " Retry-After=" + retryAfter) +
+                        ": " + body));
                 }
                 latch.countDown();
             }
@@ -207,7 +250,14 @@ public class LLM {
         });
 
         try {
-            latch.await(120, TimeUnit.SECONDS);
+            if (!latch.await(180, TimeUnit.SECONDS)) {
+                if (contentBuilder.length() > 0 || !tcMap.isEmpty()) {
+                    System.err.println("[CC] stream timeout; using partial response content=" +
+                        contentBuilder.length() + " tools=" + tcMap.size());
+                } else {
+                    throw new RuntimeException("LLM stream timed out");
+                }
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Request interrupted", e);
@@ -252,6 +302,75 @@ public class LLM {
     }
 
     /**
+     * Non-streaming fallback for providers that occasionally stall SSE streams.
+     */
+    private LLMResponse nonStreamRequest(Map<String, Object> originalBody) {
+        Map<String, Object> body = new LinkedHashMap<>(originalBody);
+        body.put("stream", false);
+        body.remove("stream_options");
+
+        String json;
+        try {
+            json = mapper.writeValueAsString(body);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize non-stream request", e);
+        }
+
+        Request request = new Request.Builder()
+            .url(baseUrl + "/chat/completions")
+            .addHeader("Authorization", "Bearer " + apiKey)
+            .addHeader("Content-Type", "application/json")
+            .post(RequestBody.create(json, MediaType.parse("application/json")))
+            .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            String responseBody = response.body() != null ? response.body().string() : "";
+            if (!response.isSuccessful()) {
+                throw new RuntimeException("HTTP " + response.code() + ": " + responseBody);
+            }
+
+            JsonNode root = mapper.readTree(responseBody);
+            JsonNode choice = root.path("choices").isArray() && !root.path("choices").isEmpty()
+                ? root.path("choices").get(0)
+                : mapper.createObjectNode();
+            JsonNode message = choice.path("message");
+
+            String content = message.path("content").isNull() ? "" : message.path("content").asText("");
+            String reasoning = message.path("reasoning_content").asText("");
+            List<ToolCall> parsed = new ArrayList<>();
+
+            JsonNode toolCalls = message.path("tool_calls");
+            if (toolCalls.isArray()) {
+                for (JsonNode toolCall : toolCalls) {
+                    JsonNode function = toolCall.path("function");
+                    Map<String, Object> args;
+                    try {
+                        args = mapper.readValue(function.path("arguments").asText("{}"),
+                            new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                    } catch (Exception e) {
+                        args = Map.of();
+                    }
+                    parsed.add(new ToolCall(
+                        toolCall.path("id").asText(""),
+                        function.path("name").asText(""),
+                        args
+                    ));
+                }
+            }
+
+            JsonNode usage = root.path("usage");
+            int promptTokens = usage.path("prompt_tokens").asInt(0);
+            int completionTokens = usage.path("completion_tokens").asInt(0);
+            totalPromptTokens += promptTokens;
+            totalCompletionTokens += completionTokens;
+
+            return new LLMResponse(content, parsed, reasoning, promptTokens, completionTokens);
+        } catch (IOException e) {
+            throw new RuntimeException("Non-stream request failed", e);
+        }
+    }
+
+    /**
      * 带指数退避的重试机制。
      */
     public <T> T callWithRetry(java.util.function.Supplier<T> call, int maxRetries) {
@@ -280,14 +399,49 @@ public class LLM {
         return text.contains("remoteprotocolerror") ||
                text.contains("incomplete chunked read") ||
                text.contains("peer closed connection") ||
+               text.contains("connection refused") ||
                text.contains("connection reset") ||
+               text.contains("connectexception") ||
+               text.contains("failed to connect") ||
+               text.contains("couldn't connect") ||
+               text.contains("network is unreachable") ||
                text.contains("readerror") ||
-               text.contains("timeout");
+               text.contains("timeout") ||
+               text.contains("http 429") ||
+               text.contains("too many requests") ||
+               text.contains("rate limit") ||
+               text.contains("http 500") ||
+               text.contains("http 502") ||
+               text.contains("http 503") ||
+               text.contains("http 504");
+    }
+
+    private boolean isStreamTimeout(Exception e) {
+        String text = (e.getClass().getName() + ": " + e.getMessage()).toLowerCase();
+        return text.contains("llm stream timed out") ||
+               text.contains("stream timed out") ||
+               text.contains("sockettimeoutexception");
+    }
+
+    private boolean nonStreamFallbackEnabled() {
+        String disabled = System.getenv().getOrDefault("CORECC_DISABLE_NONSTREAM_FALLBACK", "");
+        return !(disabled.equals("1") || disabled.equalsIgnoreCase("true") || disabled.equalsIgnoreCase("yes"));
+    }
+
+    private boolean isStreamOptionsUnsupported(Exception e) {
+        String text = (e.getClass().getName() + ": " + e.getMessage()).toLowerCase();
+        return text.contains("stream_options") &&
+               (text.contains("unsupported") ||
+                text.contains("unknown") ||
+                text.contains("unrecognized") ||
+                text.contains("invalid") ||
+                text.contains("http 400"));
     }
 
     private void sleep(int attempt) {
         try {
-            Thread.sleep((long) Math.pow(2, attempt) * 1000);
+            long delayMs = Math.min(60_000L, (long) Math.pow(2, attempt) * 1000L);
+            Thread.sleep(delayMs);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
         }
