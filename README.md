@@ -99,6 +99,10 @@ CoreCC 的配置优先级：**命令行参数 > 环境变量 > `.env` 文件 > �
 | `CORECC_MAX_TOKENS` | 单次输出 token 上限 | `4096` |
 | `CORECC_TEMPERATURE` | 采样温度 | `0` |
 | `CORECC_MAX_CONTEXT` | 上下文窗口上限 | `128000` |
+| `CORECC_SKILLS` | 本地 Skill 目录列表（指向 skill 目录或包含多个 skill 的根目录） | - |
+| `CORECC_MCP_CONFIG` | Claude-style MCP 配置 JSON 路径 | - |
+| `CORECC_MCP_TIMEOUT_SEC` | stdio MCP 请求超时秒数 | `30` |
+| `CORECC_DISABLE_NONSTREAM_FALLBACK` | 流式超时后禁用非流式兜底 | - |
 
 ### .env 文件示例
 
@@ -124,6 +128,36 @@ export DEEPSEEK_API_KEY=sk-xxx
 export OPENAI_BASE_URL=http://localhost:11434/v1
 export OPENAI_API_KEY=ollama
 ```
+
+### Skill 与 MCP
+
+CoreCC 可以在启动时加载本地 Skill 和 stdio MCP 工具：
+
+```bash
+export CORECC_SKILLS=/path/to/skills
+export CORECC_MCP_CONFIG=/path/to/mcp.json
+corecc -p "use the configured capabilities"
+```
+
+`CORECC_SKILLS` 支持一个 skill 目录（含 `SKILL.md`）或包含多个 skill 子目录的根目录。加载后会新增只读 `skill` 工具，模型可先列出 skill，再按需读取完整 `SKILL.md`。
+
+`CORECC_MCP_CONFIG` 使用 Claude-style 配置：
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "command": "node",
+      "args": ["server.js"],
+      "env": {},
+      "cwd": "/app",
+      "trusted": false
+    }
+  }
+}
+```
+
+MCP 工具会以 `mcp__server__tool` 名称暴露。默认都按非只读处理；只有配置中 `trusted: true` 且工具声明 `readOnlyHint: true` 时才允许并行执行。
 
 ### 命令行参数
 
@@ -244,7 +278,7 @@ public class HttpTool implements Tool {
 
 ```
 com.corecc/
-├── CoreCC.java                入口（picocli 参数解析）
+├── CoreCC.java                入口（cli 参数解析）
 ├── cli/
 │   └── CLI.java               用户交互层（REPL + 流式输出 + 斜杠命令）
 ├── agent/
