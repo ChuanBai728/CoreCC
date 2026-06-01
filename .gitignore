@@ -21,6 +21,7 @@ Thumbs.db
 jobs/
 local-dataset/
 terminal-bench-2/
+corecc_agent.py
 .corecc/
 __pycache__/
 
