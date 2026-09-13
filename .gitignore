@@ -25,5 +25,8 @@ corecc_agent.py
 .corecc/
 __pycache__/
 
+# External repos
+external-ruler/
+
 # Logs
 *.log
