@@ -2,6 +2,7 @@ package com.corecc;
 
 import com.corecc.cli.CLI;
 import com.corecc.config.Config;
+import com.corecc.session.TaskCheckpointManager;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -76,8 +77,20 @@ public class CoreCC implements Runnable {
             // Resume session if specified
             if (resume != null) {
                 var sessionData = com.corecc.session.SessionManager.loadSession(resume);
+                boolean resumedCheckpoint = false;
+                if (sessionData == null) {
+                    sessionData = TaskCheckpointManager.loadAsSession(resume);
+                    resumedCheckpoint = sessionData != null;
+                }
                 if (sessionData != null) {
                     cli.getAgent().getMessages().addAll(sessionData.messages);
+                    if (resumedCheckpoint) {
+                        cli.getAgent().configureTaskCheckpoint(
+                            config.isTaskCheckpointEnabled(),
+                            resume,
+                            config.getModel()
+                        );
+                    }
                     System.out.printf("已恢复会话：%s（模型：%s）%n", resume, sessionData.model);
                 } else {
                     System.err.printf("未找到会话 '%s'。%n", resume);

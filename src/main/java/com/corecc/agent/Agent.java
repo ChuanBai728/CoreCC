@@ -12,6 +12,7 @@ import com.corecc.runtime.ArtifactVerifier;
 import com.corecc.runtime.RuntimeReview;
 import com.corecc.runtime.RuntimeStats;
 import com.corecc.runtime.ToolReview;
+import com.corecc.session.TaskCheckpointManager;
 import com.corecc.tools.*;
 
 import java.util.*;
@@ -42,6 +43,9 @@ public class Agent {
     private final int maxRounds;
     private final String systemPrompt;
     private final String capabilityPromptBlock;
+    private boolean taskCheckpointEnabled;
+    private String taskCheckpointId;
+    private String taskCheckpointModel;
 
     public Agent(LLM llm, List<Tool> tools, int maxContextTokens, int maxRounds,
                  MemoryStore memory, boolean enableMemory) {
@@ -61,6 +65,9 @@ public class Agent {
         this.maxRounds = maxRounds;
         this.capabilityPromptBlock = capabilityPromptBlock != null ? capabilityPromptBlock : "";
         this.systemPrompt = PromptBuilder.systemPrompt(this.tools, this.capabilityPromptBlock);
+        this.taskCheckpointEnabled = false;
+        this.taskCheckpointId = null;
+        this.taskCheckpointModel = llm != null ? llm.getModel() : "";
 
         // Inject parent agent reference for AgentTool
         for (Tool t : this.tools) {
@@ -105,6 +112,14 @@ public class Agent {
 
     public String getCapabilityPromptBlock() { return capabilityPromptBlock; }
 
+    public void configureTaskCheckpoint(boolean enabled, String checkpointId, String model) {
+        this.taskCheckpointEnabled = enabled;
+        this.taskCheckpointId = checkpointId;
+        this.taskCheckpointModel = model != null ? model : (llm != null ? llm.getModel() : "");
+    }
+
+    public String getTaskCheckpointId() { return taskCheckpointId; }
+
     /**
      * 处理一条用户消息，可能涉及多轮大模型/工具调用。
      */
@@ -129,15 +144,21 @@ public class Agent {
         int missingArtifactToolRounds = 0;
         int transientLlmRecoveries = 0;
         int maxTransientLlmRecoveries = maxTransientLlmRecoveries();
+        saveTaskCheckpoint("running", "request_received", -1, userInput,
+            Map.of("requested_output_paths", requestedOutputPaths));
 
         // Token budget control: track per-round spending
         int tokenBudget = llm.getMaxTokens() > 0 ? llm.getMaxTokens() * 4 : 32768 * 4;
 
         for (int round = 0; round < maxRounds; round++) {
+            saveTaskCheckpoint("running", "before_llm", round, userInput,
+                Map.of("requested_output_paths", requestedOutputPaths));
             LLMResponse resp;
             try {
                 resp = callLlmWithReactiveCompact(onToken);
             } catch (ContextLengthRetryError e) {
+                saveTaskCheckpoint("failed", "context_length_retry_failed", round, userInput,
+                    Map.of("error", e.getMessage()));
                 return e.getMessage();
             } catch (RuntimeException e) {
                 if (isTransientLlmError(e)) {
@@ -148,10 +169,16 @@ public class Agent {
                         messages.add(Map.of("role", "user", "content",
                             transientLlmRecoveryNudge(missingOutputs, rootMessage(e),
                                 transientLlmRecoveries, maxTransientLlmRecoveries)));
+                        saveTaskCheckpoint("running", "transient_llm_recovery", round, userInput,
+                            Map.of("missing_outputs", missingOutputs, "error", rootMessage(e)));
                         continue;
                     }
+                    saveTaskCheckpoint("failed", "llm_request_failed", round, userInput,
+                        Map.of("error", rootMessage(e)));
                     return "LLM request failed after retries: " + rootMessage(e);
                 }
+                saveTaskCheckpoint("failed", "runtime_exception", round, userInput,
+                    Map.of("error", rootMessage(e)));
                 throw e;
             }
 
@@ -164,6 +191,8 @@ public class Agent {
                     messages.add(resp.toMessage());
                     artifactNudges++;
                     messages.add(Map.of("role", "user", "content", artifactNudge(missingOutputs)));
+                    saveTaskCheckpoint("running", "artifact_nudge", round, userInput,
+                        Map.of("missing_outputs", missingOutputs, "artifact_nudges", artifactNudges));
                     continue;
                 }
 
@@ -180,6 +209,8 @@ public class Agent {
                             messages.add(resp.toMessage());
                             verificationAttempts++;
                             messages.add(Map.of("role", "user", "content", vReport.getNudge()));
+                            saveTaskCheckpoint("running", "artifact_verification_nudge", round, userInput,
+                                Map.of("verification_attempts", verificationAttempts));
                             continue;
                         }
                         artifactVerified = true;
@@ -210,6 +241,8 @@ public class Agent {
                 }
 
                 messages.add(resp.toMessage());
+                saveTaskCheckpoint("completed", "completed", round, userInput,
+                    Map.of("artifact_verified", artifactVerified));
                 return content;
             }
 
@@ -243,6 +276,8 @@ public class Agent {
             // Compress context after tool execution
             report = context.maybeCompress(messages, llm, "auto", false);
             recordContextReport(report);
+            saveTaskCheckpoint("running", "after_tools", round, userInput,
+                Map.of("tool_calls", resp.getToolCalls().size(), "requested_output_paths", requestedOutputPaths));
 
             if (!requestedOutputPaths.isEmpty()) {
                 List<String> missingOutputs = missingOutputPaths(requestedOutputPaths);
@@ -253,6 +288,8 @@ public class Agent {
                             "Runtime benchmark warning: requested output files are still missing: " +
                             String.join(", ", missingOutputs) + ". Stop exploring and create the required artifact now. " +
                             "Use write_file for text or write_bytes_base64 for binary data, then run a focused verification command."));
+                        saveTaskCheckpoint("running", "missing_artifact_warning", round, userInput,
+                            Map.of("missing_outputs", missingOutputs));
                     }
                 }
             }
@@ -261,6 +298,8 @@ public class Agent {
         if (!requestedOutputPaths.isEmpty()) {
             List<String> missingOutputs = missingOutputPaths(requestedOutputPaths);
             if (!missingOutputs.isEmpty()) {
+                saveTaskCheckpoint("failed", "max_rounds_missing_outputs", maxRounds, userInput,
+                    Map.of("missing_outputs", missingOutputs));
                 return "Reached maximum tool rounds; missing requested output files: " + String.join(", ", missingOutputs);
             }
         }
@@ -271,6 +310,37 @@ public class Agent {
     /**
      * 调用 LLM；遇到上下文过长时强制硬压缩并重试一次。
      */
+    private void saveTaskCheckpoint(String status, String phase, int round, String taskInput,
+                                    Map<String, Object> metadata) {
+        if (!taskCheckpointEnabled) {
+            return;
+        }
+        try {
+            Map<String, Object> checkpointMetadata = new LinkedHashMap<>();
+            if (metadata != null) {
+                checkpointMetadata.putAll(metadata);
+            }
+            checkpointMetadata.put("message_count", messages.size());
+            checkpointMetadata.put("context_tokens", ContextManager.estimateTokens(messages));
+            checkpointMetadata.put("tool_calls", stats.getToolCalls());
+            checkpointMetadata.put("tool_successes", stats.getToolSuccesses());
+            checkpointMetadata.put("tool_failures", stats.getToolFailures());
+
+            taskCheckpointId = TaskCheckpointManager.saveCheckpoint(
+                taskCheckpointId,
+                taskCheckpointModel,
+                messages,
+                status,
+                phase,
+                round,
+                taskInput,
+                checkpointMetadata
+            );
+        } catch (Exception ignored) {
+            // Checkpointing must never break the active task.
+        }
+    }
+
     private LLMResponse callLlmWithReactiveCompact(Consumer<String> onToken) {
         try {
             return llm.chat(fullMessages(), toolSchemas(), onToken);

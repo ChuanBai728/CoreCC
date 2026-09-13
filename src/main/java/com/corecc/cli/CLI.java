@@ -10,6 +10,7 @@ import com.corecc.memory.MemoryEntry;
 import com.corecc.memory.MemoryStore;
 import com.corecc.runtime.RuntimeStats;
 import com.corecc.session.SessionManager;
+import com.corecc.session.TaskCheckpointManager;
 import com.corecc.tools.EditFileTool;
 import com.corecc.tools.Tool;
 import com.corecc.tools.ToolRegistry;
@@ -69,6 +70,11 @@ public class CLI {
             MemoryStore.forWorkspace(null, null),
             true,
             capabilities.promptBlock()
+        );
+        this.agent.configureTaskCheckpoint(
+            config.isTaskCheckpointEnabled(),
+            config.getCheckpointId(),
+            config.getModel()
         );
     }
 
@@ -240,6 +246,25 @@ public class CLI {
                     for (SessionManager.SessionInfo s : sessions) {
                         System.out.printf("  %s (%s, %s) %s%n",
                             s.id, s.model, s.savedAt, s.preview);
+                    }
+                }
+                continue;
+            }
+
+            if (userInput.equals("/checkpoints")) {
+                List<TaskCheckpointManager.TaskCheckpointInfo> checkpoints =
+                    TaskCheckpointManager.listCheckpoints();
+                if (checkpoints.isEmpty()) {
+                    System.out.println("No saved task checkpoints.");
+                } else {
+                    for (TaskCheckpointManager.TaskCheckpointInfo checkpoint : checkpoints) {
+                        System.out.printf("  %s (%s/%s, %s, %s) %s%n",
+                            checkpoint.id(),
+                            checkpoint.status(),
+                            checkpoint.phase(),
+                            checkpoint.model(),
+                            checkpoint.updatedAt(),
+                            checkpoint.preview());
                     }
                 }
                 continue;

@@ -19,6 +19,8 @@ public class Config {
     private int maxTokens;
     private double temperature;
     private int maxContextTokens;
+    private boolean taskCheckpointEnabled;
+    private String checkpointId;
 
     public Config() {
         this.model = "gpt-4o";
@@ -27,16 +29,26 @@ public class Config {
         this.maxTokens = 4096;
         this.temperature = 0.0;
         this.maxContextTokens = 128000;
+        this.taskCheckpointEnabled = true;
+        this.checkpointId = null;
     }
 
     public Config(String model, String apiKey, String baseUrl, int maxTokens,
                   double temperature, int maxContextTokens) {
+        this(model, apiKey, baseUrl, maxTokens, temperature, maxContextTokens, true, null);
+    }
+
+    public Config(String model, String apiKey, String baseUrl, int maxTokens,
+                  double temperature, int maxContextTokens,
+                  boolean taskCheckpointEnabled, String checkpointId) {
         this.model = model;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
         this.maxTokens = maxTokens;
         this.temperature = temperature;
         this.maxContextTokens = maxContextTokens;
+        this.taskCheckpointEnabled = taskCheckpointEnabled;
+        this.checkpointId = checkpointId;
     }
 
     /**
@@ -71,7 +83,9 @@ public class Config {
             baseUrl,
             Integer.parseInt(getConfigValue(dotenv, "CORECC_MAX_TOKENS", "4096")),
             Double.parseDouble(getConfigValue(dotenv, "CORECC_TEMPERATURE", "0")),
-            Integer.parseInt(getConfigValue(dotenv, "CORECC_MAX_CONTEXT", "128000"))
+            Integer.parseInt(getConfigValue(dotenv, "CORECC_MAX_CONTEXT", "128000")),
+            parseBoolean(getConfigValue(dotenv, "CORECC_TASK_CHECKPOINT", "true")),
+            blankToNull(getConfigValue(dotenv, "CORECC_CHECKPOINT_ID", null))
         );
     }
 
@@ -88,6 +102,18 @@ public class Config {
             }
         }
         return defaultValue;
+    }
+
+    private static boolean parseBoolean(String value) {
+        if (value == null) {
+            return true;
+        }
+        String normalized = value.trim().toLowerCase();
+        return !(normalized.equals("false") || normalized.equals("0") || normalized.equals("no"));
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     // Getters and setters
@@ -108,6 +134,12 @@ public class Config {
 
     public int getMaxContextTokens() { return maxContextTokens; }
     public void setMaxContextTokens(int maxContextTokens) { this.maxContextTokens = maxContextTokens; }
+
+    public boolean isTaskCheckpointEnabled() { return taskCheckpointEnabled; }
+    public void setTaskCheckpointEnabled(boolean taskCheckpointEnabled) { this.taskCheckpointEnabled = taskCheckpointEnabled; }
+
+    public String getCheckpointId() { return checkpointId; }
+    public void setCheckpointId(String checkpointId) { this.checkpointId = checkpointId; }
 
     @Override
     public String toString() {
