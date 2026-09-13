@@ -46,6 +46,7 @@ public class Agent {
     private boolean taskCheckpointEnabled;
     private String taskCheckpointId;
     private String taskCheckpointModel;
+    private boolean readOnlyParallelEnabled;
 
     public Agent(LLM llm, List<Tool> tools, int maxContextTokens, int maxRounds,
                  MemoryStore memory, boolean enableMemory) {
@@ -68,6 +69,7 @@ public class Agent {
         this.taskCheckpointEnabled = false;
         this.taskCheckpointId = null;
         this.taskCheckpointModel = llm != null ? llm.getModel() : "";
+        this.readOnlyParallelEnabled = readBooleanEnv("CORECC_READONLY_PARALLEL", true);
 
         // Inject parent agent reference for AgentTool
         for (Tool t : this.tools) {
@@ -119,6 +121,10 @@ public class Agent {
     }
 
     public String getTaskCheckpointId() { return taskCheckpointId; }
+
+    public void setReadOnlyParallelEnabled(boolean enabled) {
+        this.readOnlyParallelEnabled = enabled;
+    }
 
     /**
      * 处理一条用户消息，可能涉及多轮大模型/工具调用。
@@ -341,6 +347,15 @@ public class Agent {
         }
     }
 
+    private static boolean readBooleanEnv(String name, boolean defaultValue) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        return !(normalized.equals("false") || normalized.equals("0") || normalized.equals("no"));
+    }
+
     private LLMResponse callLlmWithReactiveCompact(Consumer<String> onToken) {
         try {
             return llm.chat(fullMessages(), toolSchemas(), onToken);
@@ -440,7 +455,7 @@ public class Agent {
         while (i < toolCalls.size()) {
             ToolCall tc = toolCalls.get(i);
             Tool tool = getTool(tc.getName());
-            boolean isReadOnly = tool != null && tool.isReadOnly();
+            boolean isReadOnly = readOnlyParallelEnabled && tool != null && tool.isReadOnly();
 
             if (!isReadOnly) {
                 if (onTool != null) onTool.accept(tc.getName(), tc.getArguments());
@@ -454,7 +469,7 @@ public class Agent {
             while (i < toolCalls.size()) {
                 ToolCall nextTc = toolCalls.get(i);
                 Tool nextTool = getTool(nextTc.getName());
-                if (!(nextTool != null && nextTool.isReadOnly())) break;
+                if (!(readOnlyParallelEnabled && nextTool != null && nextTool.isReadOnly())) break;
 
                 if (onTool != null) onTool.accept(nextTc.getName(), nextTc.getArguments());
                 batch.add(new int[]{i});
