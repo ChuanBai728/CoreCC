@@ -32,6 +32,9 @@ public class CoreCC implements Runnable {
     @Option(names = {"-p", "--prompt"}, description = "单次提示（非交互模式）")
     private String prompt;
 
+    @Option(names = {"--yes"}, description = "自动允许所有可能修改状态的工具调用")
+    private boolean allowAll;
+
     @Option(names = {"-r", "--resume"}, description = "恢复已保存的会话")
     private String resume;
 
@@ -72,7 +75,9 @@ public class CoreCC implements Runnable {
             }
 
             // Create CLI instance
-            CLI cli = new CLI(config);
+            boolean interactive = prompt == null || prompt.isEmpty();
+            boolean benchmarkMode = "1".equals(System.getenv("CORECC_BENCH_MODE"));
+            CLI cli = new CLI(config, allowAll || benchmarkMode, interactive);
 
             // Resume session if specified
             if (resume != null) {

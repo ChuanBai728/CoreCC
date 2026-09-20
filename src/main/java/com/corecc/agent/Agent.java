@@ -7,6 +7,7 @@ import com.corecc.llm.LLMResponse;
 import com.corecc.llm.ToolCall;
 import com.corecc.memory.MemoryEntry;
 import com.corecc.memory.MemoryStore;
+import com.corecc.permissions.PermissionPolicy;
 import com.corecc.prompt.PromptBuilder;
 import com.corecc.runtime.ArtifactVerifier;
 import com.corecc.runtime.RuntimeReview;
@@ -47,6 +48,8 @@ public class Agent {
     private String taskCheckpointId;
     private String taskCheckpointModel;
     private boolean readOnlyParallelEnabled;
+    private PermissionPolicy permissionPolicy;
+    private boolean planMode;
 
     public Agent(LLM llm, List<Tool> tools, int maxContextTokens, int maxRounds,
                  MemoryStore memory, boolean enableMemory) {
@@ -70,6 +73,8 @@ public class Agent {
         this.taskCheckpointId = null;
         this.taskCheckpointModel = llm != null ? llm.getModel() : "";
         this.readOnlyParallelEnabled = readBooleanEnv("CORECC_READONLY_PARALLEL", true);
+        this.permissionPolicy = null;
+        this.planMode = false;
 
         // Inject parent agent reference for AgentTool
         for (Tool t : this.tools) {
@@ -125,6 +130,11 @@ public class Agent {
     public void setReadOnlyParallelEnabled(boolean enabled) {
         this.readOnlyParallelEnabled = enabled;
     }
+
+    public PermissionPolicy getPermissionPolicy() { return permissionPolicy; }
+    public void setPermissionPolicy(PermissionPolicy permissionPolicy) { this.permissionPolicy = permissionPolicy; }
+    public boolean isPlanMode() { return planMode; }
+    public void setPlanMode(boolean planMode) { this.planMode = planMode; }
 
     /**
      * 处理一条用户消息，可能涉及多轮大模型/工具调用。
@@ -383,6 +393,9 @@ public class Agent {
      */
     private List<Map<String, Object>> fullMessages() {
         String system = systemPrompt;
+        if (planMode) {
+            system += "\n\n" + PromptBuilder.planModePrompt();
+        }
         String memoryBlock = MemoryStore.formatMemoryBlock(activeMemories, 1800);
         if (!memoryBlock.isEmpty()) {
             system = system + "\n\n" + memoryBlock;
@@ -422,9 +435,15 @@ public class Agent {
             return finalizeToolResult(tc.getName(), "错误：未知工具 '" + tc.getName() + "'");
         }
 
+        Map<String, Object> arguments = tc.getArguments() != null ? tc.getArguments() : Map.of();
+        String refusal = permissionRefusal(tool, arguments);
+        if (refusal != null) {
+            return finalizeToolResult(tc.getName(), refusal);
+        }
+
         String result;
         try {
-            result = tool.execute(tc.getArguments() != null ? tc.getArguments() : Map.of());
+            result = tool.execute(arguments);
         } catch (IllegalArgumentException e) {
             result = "错误：" + tc.getName() + " 参数错误: " + e.getMessage();
         } catch (Exception e) {
@@ -434,6 +453,14 @@ public class Agent {
         result = context.optimizeToolResult(tc.getName(), tc.getArguments(), result);
         recordContextReport(context.getLastReport());
         return finalizeToolResult(tc.getName(), result);
+    }
+
+    private String permissionRefusal(Tool tool, Map<String, Object> arguments) {
+        if (planMode && !tool.isReadOnly()) {
+            return "Plan mode is active, so this state-changing tool call was refused. " +
+                "Continue with read-only investigation, present the plan, and wait for approval.";
+        }
+        return permissionPolicy == null ? null : permissionPolicy.check(tool, arguments);
     }
 
     /**

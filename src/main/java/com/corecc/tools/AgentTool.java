@@ -77,6 +77,7 @@ public class AgentTool implements Tool {
                 false,  // disable memory
                 parentAgent.getCapabilityPromptBlock()
             );
+            subAgent.setPermissionPolicy(parentAgent.getPermissionPolicy());
 
             // Run sub-agent
             String result = subAgent.chat(task, null, null);

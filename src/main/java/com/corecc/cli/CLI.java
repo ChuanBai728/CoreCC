@@ -8,6 +8,7 @@ import com.corecc.context.ContextManager;
 import com.corecc.llm.LLM;
 import com.corecc.memory.MemoryEntry;
 import com.corecc.memory.MemoryStore;
+import com.corecc.permissions.PermissionPolicy;
 import com.corecc.runtime.RuntimeStats;
 import com.corecc.session.SessionManager;
 import com.corecc.session.TaskCheckpointManager;
@@ -36,10 +37,16 @@ public class CLI {
     private final Config config;
     private final Agent agent;
     private final Terminal terminal;
+    private final PermissionPolicy permissionPolicy;
+    private LineReader reader;
 
     public Agent getAgent() { return agent; }
 
     public CLI(Config config) throws IOException {
+        this(config, true, false);
+    }
+
+    public CLI(Config config, boolean allowAll, boolean interactive) throws IOException {
         this.config = config;
         this.terminal = TerminalBuilder.builder()
             .system(true)
@@ -76,6 +83,8 @@ public class CLI {
             config.getCheckpointId(),
             config.getModel()
         );
+        this.permissionPolicy = new PermissionPolicy(interactive ? this::askPermission : null, allowAll);
+        this.agent.setPermissionPolicy(permissionPolicy);
     }
 
     /**
@@ -113,7 +122,7 @@ public class CLI {
         Path historyPath = Path.of(System.getProperty("user.home"), ".corecc_history");
         History history = new DefaultHistory();
 
-        LineReader reader = LineReaderBuilder.builder()
+        reader = LineReaderBuilder.builder()
             .terminal(terminal)
             .parser(parser)
             .history(history)
@@ -168,6 +177,20 @@ public class CLI {
                     System.out.println("当前模型：" + config.getModel());
                 }
                 continue;
+            }
+
+            if (userInput.equals("/plan")) {
+                agent.setPlanMode(!agent.isPlanMode());
+                System.out.println(agent.isPlanMode()
+                    ? "Plan 模式已开启：只允许只读工具。输入 approve 执行计划，或再次输入 /plan 退出。"
+                    : "Plan 模式已关闭。");
+                continue;
+            }
+
+            if (agent.isPlanMode() && (userInput.equalsIgnoreCase("approve") || userInput.equalsIgnoreCase("/approve"))) {
+                agent.setPlanMode(false);
+                userInput = "approve";
+                System.out.println("Plan 模式已关闭，开始执行。 ");
             }
 
             if (userInput.equals("/compact")) {
@@ -294,6 +317,19 @@ public class CLI {
         }
     }
 
+    private PermissionPolicy.Decision askPermission(String toolName, Map<String, Object> args) {
+        if (reader == null) return PermissionPolicy.Decision.DENY;
+        try {
+            String answer = reader.readLine(String.format(
+                "允许 %s(%s)？[y] 一次 [a] 本会话 [n] 拒绝 > ", toolName, brief(args))).trim().toLowerCase();
+            if (answer.equals("a") || answer.equals("always")) return PermissionPolicy.Decision.ALLOW_ALWAYS;
+            if (answer.equals("y") || answer.equals("yes")) return PermissionPolicy.Decision.ALLOW_ONCE;
+        } catch (UserInterruptException | EndOfFileException ignored) {
+            // Interruption at a consent prompt is a denial, not an application exit.
+        }
+        return PermissionPolicy.Decision.DENY;
+    }
+
     private void showHelp() {
         System.out.println("""
             命令：
@@ -304,6 +340,7 @@ public class CLI {
               /tokens        显示 Token 用量
               /status        显示运行时状态
               /compact       压缩对话上下文
+              /plan          切换只读规划模式
               /remember <内容> 保存长期记忆
               /memory [关键词] 查看或搜索长期记忆
               /forget <ID>    删除长期记忆

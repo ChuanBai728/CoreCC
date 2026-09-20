@@ -79,7 +79,7 @@ mvn clean package
 java -jar target/corecc-0.3.0.jar
 
 # 单次任务模式
-java -jar target/corecc-0.3.0.jar -p "读取 Main.java 并修复拼写错误的 import"
+java -jar target/corecc-0.3.0.jar --yes -p "读取 Main.java 并修复拼写错误的 import"
 ```
 
 ---
@@ -167,6 +167,7 @@ MCP 工具会以 `mcp__server__tool` 名称暴露。默认都按非只读处理�
 | `--base-url <url>` | 指定 API 地址 |
 | `--api-key <key>` | 指定 API 密钥 |
 | `-p, --prompt <text>` | 单次任务模式（执行后退出） |
+| `--yes` | 预先允许写文件、Shell、MCP 等有副作用的工具；单次模式默认拒绝此类工具 |
 | `-r, --resume <id>` | 恢复指定会话 |
 | `-v, --version` | 显示版本信息 |
 
@@ -192,6 +193,7 @@ java -jar target/corecc-0.3.0.jar
 | `/tokens` | 查看 token 使用量（prompt / completion / total） |
 | `/status` | 查看运行时状态（上下文压力、工具统计、压缩记录） |
 | `/compact` | 手动触发上下文压缩 |
+| `/plan` | 切换只读规划模式；输入 `approve` 后开始执行 |
 | `/remember <text>` | 保存一条长期记忆 |
 | `/memory [query]` | 查看或搜索长期记忆 |
 | `/forget <id>` | 删除一条长期记忆 |

@@ -9,6 +9,13 @@ import java.util.stream.Collectors;
  *
  */
 public class PromptBuilder {
+    private static final String PLAN_MODE_PROMPT = """
+        # Plan mode
+        - Investigate with read-only tools only. Do not write files, run commands, call external tools, or spawn sub-agents.
+        - Present a concise numbered implementation plan and stop.
+        - The user can approve the plan before execution begins.
+        """;
+
     /**
      * 生成系统提示词，包含环境信息、可用工具列表和行为规则。
      */
@@ -75,5 +82,9 @@ public class PromptBuilder {
             capabilityBlock == null || capabilityBlock.isBlank() ? "" : capabilityBlock,
             benchmarkRules
         );
+    }
+
+    public static String planModePrompt() {
+        return PLAN_MODE_PROMPT;
     }
 }
