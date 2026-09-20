@@ -211,13 +211,9 @@ public class Agent {
 
                 // Artifact verification: file exists but not yet verified
                 if (missingOutputs.isEmpty() && !artifactVerified && !requestedOutputPaths.isEmpty()) {
-                    List<String[]> checks = ArtifactVerifier.buildChecks(userInput, requestedOutputPaths);
-                    if (!checks.isEmpty() && verificationAttempts < 3) {
-                        List<String> checkResults = new ArrayList<>();
-                        for (String[] check : checks) {
-                            checkResults.add(runBashCommand(check[1]));
-                        }
-                        ArtifactVerifier.VerifyReport vReport = ArtifactVerifier.evaluate(checks, checkResults);
+                    if (verificationAttempts < 3) {
+                        ArtifactVerifier.VerifyReport vReport = ArtifactVerifier.verify(
+                            userInput, requestedOutputPaths, this::runBashCommand);
                         if (!vReport.allPassed()) {
                             messages.add(resp.toMessage());
                             verificationAttempts++;
