@@ -141,7 +141,7 @@ public class Agent {
      */
     public String chat(String userInput, Consumer<String> onToken, BiConsumer<String, Map<String, Object>> onTool) {
         // Search memory if enabled
-        if (memory != null && !MemoryStore.shouldIgnoreMemory(userInput)) {
+        if (enableMemory && memory != null && !MemoryStore.shouldIgnoreMemory(userInput)) {
             activeMemories = memory.search(userInput, 5, true);
         } else {
             activeMemories = new ArrayList<>();
@@ -162,9 +162,6 @@ public class Agent {
         int maxTransientLlmRecoveries = maxTransientLlmRecoveries();
         saveTaskCheckpoint("running", "request_received", -1, userInput,
             Map.of("requested_output_paths", requestedOutputPaths));
-
-        // Token budget control: track per-round spending
-        int tokenBudget = llm.getMaxTokens() > 0 ? llm.getMaxTokens() * 4 : 32768 * 4;
 
         for (int round = 0; round < maxRounds; round++) {
             saveTaskCheckpoint("running", "before_llm", round, userInput,

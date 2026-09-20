@@ -36,7 +36,7 @@ CoreCC 是一款面向终端的轻量级本地 AI 编程智能体，基于 Java 
 - **多模型兼容** — 支持 OpenAI、DeepSeek、Kimi、Qwen、Ollama 等所有 OpenAI 格式 API
 - **流式输出** — 基于 SSE 的实时流式响应，逐 token 输出
 - **交互式 REPL** — 基于 JLine3 的终端界面，支持历史记录、括号匹配和命令补全
-- **七项内置工具** — 文件读写、搜索替换编辑、Shell 执行、正则搜索、文件匹配、子智能体
+- **八项内置工具** — 文本/二进制文件写入、搜索替换编辑、Shell 执行、正则搜索、文件匹配、子智能体
 - **只读工具并行执行** — 自动识别只读工具并通过线程池并发执行（最多 8 线程）
 - **四级上下文压缩** — 50% / 70% / 90% 三级阈值自动压缩，支持 LLM 摘要和紧急折叠
 - **长期记忆** — 按工作区持久化偏好、项目约定和常用上下文，跨会话复用
@@ -213,12 +213,13 @@ java -jar target/corecc-0.3.0.jar -r session_20260530_120000_abcd1234
 
 ## 内置工具
 
-CoreCC 提供 7 项内置工具，大语言模型可在对话中自动调用：
+CoreCC 提供 8 项内置工具，大语言模型可在对话中自动调用：
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
 | `read_file` | 只读 | 读取文件内容，支持行号显示、偏移量和分页 |
 | `write_file` | 写入 | 创建新文件或完全覆盖，自动创建父目录 |
+| `write_bytes_base64` | 写入 | 将 Base64 数据写为图片、压缩包等二进制文件 |
 | `edit_file` | 写入 | 搜索替换式编辑，要求匹配字符串唯一，输出 unified diff |
 | `bash` | 写入 | 执行 Shell 命令，支持超时控制和危险命令拦截 |
 | `grep` | 只读 | 正则表达式内容搜索，跳过 `.git` / `node_modules` 等目录 |
@@ -295,6 +296,7 @@ com.corecc/
 │   ├── ToolRegistry.java      工具注册中心
 │   ├── ReadFileTool.java      文件读取
 │   ├── WriteFileTool.java     文件写入
+│   ├── WriteBytesBase64Tool.java 二进制文件写入
 │   ├── EditFileTool.java      搜索替换编辑
 │   ├── BashTool.java          Shell 命令执行
 │   ├── GrepTool.java          正则内容搜索

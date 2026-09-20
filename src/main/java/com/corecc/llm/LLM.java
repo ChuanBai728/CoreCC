@@ -25,7 +25,7 @@ import java.util.function.Consumer;
  * - 5xx 服务端错误自动重试，4xx 客户端错误不重试
  */
 public class LLM {
-    private final String model;
+    private volatile String model;
     private final String apiKey;
     private final String baseUrl;
     private final OkHttpClient client;
@@ -448,7 +448,12 @@ public class LLM {
 
     // Getters
     public String getModel() { return model; }
-    public void setModel(String model) { /* Use constructor for immutability */ }
+    public void setModel(String model) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("模型名称不能为空");
+        }
+        this.model = model.trim();
+    }
     public String getApiKey() { return apiKey; }
     public String getBaseUrl() { return baseUrl; }
 }

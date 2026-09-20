@@ -37,7 +37,7 @@ public class CLI {
     private final Config config;
     private final Agent agent;
     private final Terminal terminal;
-    private final PermissionPolicy permissionPolicy;
+    private final MemoryStore memoryStore;
     private LineReader reader;
 
     public Agent getAgent() { return agent; }
@@ -69,12 +69,13 @@ public class CLI {
         for (String warning : capabilities.getWarnings()) {
             System.err.println("[CoreCC capability warning] " + warning);
         }
+        this.memoryStore = MemoryStore.forWorkspace(null, null);
         this.agent = new Agent(
             llm,
             capabilities.getTools(),
             config.getMaxContextTokens(),
             50,
-            MemoryStore.forWorkspace(null, null),
+            memoryStore,
             true,
             capabilities.promptBlock()
         );
@@ -83,8 +84,7 @@ public class CLI {
             config.getCheckpointId(),
             config.getModel()
         );
-        this.permissionPolicy = new PermissionPolicy(interactive ? this::askPermission : null, allowAll);
-        this.agent.setPermissionPolicy(permissionPolicy);
+        this.agent.setPermissionPolicy(new PermissionPolicy(interactive ? this::askPermission : null, allowAll));
     }
 
     /**
@@ -171,8 +171,9 @@ public class CLI {
                 String newModel = userInput.startsWith("/model ") ?
                     userInput.substring(7).trim() : "";
                 if (!newModel.isEmpty()) {
-                    // Note: LLM model is final in our implementation
-                    System.out.println("已切换到 " + newModel + "（需要重启生效）");
+                    agent.getLlm().setModel(newModel);
+                    config.setModel(newModel);
+                    System.out.println("已切换到 " + newModel);
                 } else {
                     System.out.println("当前模型：" + config.getModel());
                 }
@@ -217,25 +218,47 @@ public class CLI {
             if (userInput.equals("/memory") || userInput.startsWith("/memory ")) {
                 String query = userInput.startsWith("/memory ") ?
                     userInput.substring(8).trim() : "";
-                // Memory display would go here
-                System.out.println("长期记忆功能已启用。");
+                List<MemoryEntry> entries = query.isEmpty()
+                    ? memoryStore.listRecent(10)
+                    : memoryStore.search(query, 10, false);
+                if (entries.isEmpty()) {
+                    System.out.println(query.isEmpty() ? "暂无长期记忆。" : "没有匹配的长期记忆。");
+                } else {
+                    entries.forEach(entry -> System.out.printf("  %s [%s/%s] %s — %s%n",
+                        entry.getId(), entry.getType(), entry.getScope(),
+                        entry.getName(), compact(entry.getContent(), 100)));
+                }
                 continue;
             }
 
             if (userInput.startsWith("/remember ")) {
                 String rawMemory = userInput.substring(10).trim();
                 if (rawMemory.isEmpty()) {
-                    System.out.println("用法：/remember [user|feedback|project|reference] [name | description | content]");
+                    System.out.println("用法：/remember [user|feedback|project|reference] <内容>");
                     continue;
                 }
-                // Memory save would go here
-                System.out.println("已记住：（记忆功能演示）");
+                String type = null;
+                String content = rawMemory;
+                int separator = rawMemory.indexOf(' ');
+                if (separator > 0 && MemoryStore.MEMORY_TYPES.contains(rawMemory.substring(0, separator))) {
+                    type = rawMemory.substring(0, separator);
+                    content = rawMemory.substring(separator + 1).trim();
+                }
+                try {
+                    MemoryEntry entry = memoryStore.add(content, List.of(), null, null,
+                        type != null ? type : MemoryStore.inferMemoryType(content), null);
+                    System.out.printf("已记住：%s（%s）%n", entry.getId(), entry.getName());
+                } catch (IllegalArgumentException e) {
+                    System.out.println("无法保存记忆：" + e.getMessage());
+                }
                 continue;
             }
 
             if (userInput.startsWith("/forget ")) {
                 String entryId = userInput.substring(8).trim();
-                System.out.println("已删除记忆：" + entryId);
+                System.out.println(memoryStore.delete(entryId)
+                    ? "已删除记忆：" + entryId
+                    : "未找到记忆：" + entryId);
                 continue;
             }
 
@@ -293,6 +316,11 @@ public class CLI {
                 continue;
             }
 
+            if (userInput.startsWith("/")) {
+                System.out.println("未知命令：" + userInput.split("\\s+", 2)[0] + "（输入 /help 查看帮助）");
+                continue;
+            }
+
             // Call agent to process user input
             StringBuilder streamed = new StringBuilder();
 
@@ -347,6 +375,7 @@ public class CLI {
               /diff          显示本次会话修改的文件
               /save          保存会话到磁盘
               /sessions      列出已保存的会话
+              /checkpoints   列出任务检查点
               quit           退出 CoreCC
             """);
     }
@@ -390,6 +419,11 @@ public class CLI {
                 String.valueOf(e.getValue()).substring(0, Math.min(40, String.valueOf(e.getValue()).length()))))
             .collect(Collectors.joining(", "));
         return s.length() > maxlen ? s.substring(0, maxlen) + "..." : s;
+    }
+
+    private String compact(String text, int maxLength) {
+        String value = text == null ? "" : text.replaceAll("\\s+", " ").trim();
+        return value.length() <= maxLength ? value : value.substring(0, maxLength - 3) + "...";
     }
 
     private String brief(Map<String, Object> args) {

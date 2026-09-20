@@ -88,15 +88,19 @@ public class CoreCC implements Runnable {
                     resumedCheckpoint = sessionData != null;
                 }
                 if (sessionData != null) {
+                    if (model == null && sessionData.model != null && !sessionData.model.isBlank()) {
+                        config.setModel(sessionData.model);
+                        cli.getAgent().getLlm().setModel(sessionData.model);
+                    }
                     cli.getAgent().getMessages().addAll(sessionData.messages);
                     if (resumedCheckpoint) {
                         cli.getAgent().configureTaskCheckpoint(
                             config.isTaskCheckpointEnabled(),
                             resume,
-                            config.getModel()
+                            cli.getAgent().getLlm().getModel()
                         );
                     }
-                    System.out.printf("已恢复会话：%s（模型：%s）%n", resume, sessionData.model);
+                    System.out.printf("已恢复会话：%s（模型：%s）%n", resume, cli.getAgent().getLlm().getModel());
                 } else {
                     System.err.printf("未找到会话 '%s'。%n", resume);
                     System.exit(1);

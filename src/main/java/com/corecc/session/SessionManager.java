@@ -20,6 +20,7 @@ import java.util.stream.Collectors;
 public class SessionManager {
     private static final Path SESSIONS_DIR = Paths.get(System.getProperty("user.home"), ".corecc", "sessions");
     private static final Pattern SAFE_SESSION_RE = Pattern.compile("[^A-Za-z0-9._-]+");
+    private static final int MAX_SESSION_ID_LENGTH = 100;
     private static final ObjectMapper mapper = new ObjectMapper();
 
     /**
@@ -35,6 +36,9 @@ public class SessionManager {
             name = name.substring(name.lastIndexOf("/") + 1);
         }
         name = SAFE_SESSION_RE.matcher(name).replaceAll("-").replaceAll("^[._-]+|[._-]+$", "");
+        if (name.length() > MAX_SESSION_ID_LENGTH) {
+            name = name.substring(0, MAX_SESSION_ID_LENGTH).replaceAll("[._-]+$", "");
+        }
         return name.isEmpty() ? newSessionId() : name;
     }
 
