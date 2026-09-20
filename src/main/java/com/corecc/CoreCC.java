@@ -20,6 +20,9 @@ import picocli.CommandLine.Option;
 )
 public class CoreCC implements Runnable {
 
+    @Option(names = {"-h", "--help"}, usageHelp = true, description = "显示帮助信息")
+    private boolean helpRequested;
+
     @Option(names = {"-m", "--model"}, description = "模型名称（默认：$CORECC_MODEL 或 gpt-4o）")
     private String model;
 
